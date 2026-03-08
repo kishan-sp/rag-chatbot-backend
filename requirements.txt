@@ -1,2 +1,13 @@
 fastapi
 uvicorn[standard]
+langchain
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+langchain-groq
+pymupdf
+faiss-cpu
+python-multipart
+python-dotenv
+slowapi
+sentence-transformers

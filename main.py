@@ -8,7 +8,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-load_dotenv()  # loads OPENAI_API_KEY from backend/.env
+load_dotenv()  # loads GROQ_API_KEY and other env vars from backend/.env
 
 # Initialize FastAPI app
 app = FastAPI(title="RAG Business Chatbot API")
@@ -81,12 +81,6 @@ async def upload(file: UploadFile = File(...), session_id: str = ""):
         raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)}")
 
     print(f"DEBUG: Active Sessions = {list(sessions.keys())}")
-
-    return {
-        "status": "ready",
-        "chunk_count": len(chunks),
-        "session_id": session_id
-    }
 
     return {
         "status": "ready",
