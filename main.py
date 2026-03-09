@@ -1,4 +1,5 @@
 import os
+import tempfile
 import fitz  # PyMuPDF
 import uvicorn
 from dotenv import load_dotenv
@@ -8,8 +9,9 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
-from langchain_classic.memory import ConversationBufferMemory
-from langchain_classic.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
+from langchain.schema import Document
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -63,10 +65,7 @@ async def upload(request: Request, file: UploadFile = File(...), session_id: str
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
-    # Create the /tmp directory locally if it doesn't exist to prevent Windows testing errors
-    tmp_dir = "/tmp"
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, file.filename)
+    tmp_path = os.path.join(tempfile.gettempdir(), file.filename)
 
     # Save to disk
     contents = await file.read()
@@ -75,12 +74,17 @@ async def upload(request: Request, file: UploadFile = File(...), session_id: str
 
     # Extract text
     doc = fitz.open(tmp_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
+    docs_with_metadata = []
+    for page_num, page in enumerate(doc):
+        page_text = page.get_text()
+        if page_text.strip():
+            docs_with_metadata.append({
+                "text": page_text,
+                "metadata": {"page": page_num + 1}
+            })
     doc.close()
 
-    if not text.strip():
+    if not docs_with_metadata:
         raise HTTPException(
             status_code=400,
             detail="No text could be extracted from this file. It may be a scanned image PDF."
@@ -91,7 +95,11 @@ async def upload(request: Request, file: UploadFile = File(...), session_id: str
         chunk_size=800,
         chunk_overlap=100,
     )
-    chunks = splitter.create_documents([text])
+    documents = [
+        Document(page_content=d["text"], metadata=d["metadata"])
+        for d in docs_with_metadata
+    ]
+    chunks = splitter.split_documents(documents)
 
     if not chunks:
         raise HTTPException(
