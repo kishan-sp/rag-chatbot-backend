@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import tempfile
+import contextlib
 import fitz  # PyMuPDF
 import uvicorn
 from datetime import datetime, timedelta
@@ -12,16 +13,16 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
-from langchain_classic.memory import ConversationBufferMemory
-from langchain_classic.chains import ConversationalRetrievalChain
-from langchain_classic.schema import Document
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
+from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-
+from fastapi.responses import JSONResponse
 # Improvement 6: UUID format validation regex
 UUID_REGEX = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
 
@@ -31,8 +32,34 @@ load_dotenv()  # loads GROQ_API_KEY and other env vars from backend/.env
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1)
 
+# Lifespan manager for startup/shutdown tasks
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Run cleanup loop in background
+    cleanup_task = asyncio.create_task(session_cleanup_loop())
+    print("[SERVER] Startup complete: Background cleanup task started.")
+    yield
+    # Shutdown: Cancel the background task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    print("[SERVER] Shutdown complete.")
+
 # Initialize FastAPI app
-app = FastAPI(title="RAG Business Chatbot API")
+app = FastAPI(title="RAG Business Chatbot API", lifespan=lifespan)
+
+# Global Exception Handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Log the full error server-side
+    print(f"[CRITICAL SERVER ERROR] {type(exc).__name__}: {exc}")
+    # Return a generic message to the client for production safety
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected server error occurred. Please try again later."}
+    )
 
 # Initialize Rate Limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -59,6 +86,7 @@ class ChatRequest(BaseModel):
     chat_history: List[Dict[str, Any]] = Field(default=[], max_items=50)
 
 class SourceSnippet(BaseModel):
+    file_name: str
     page: int
     snippet: str
 
@@ -87,9 +115,7 @@ async def session_cleanup_loop():
         await asyncio.sleep(30 * 60)  # wait 30 minutes
         cleanup_old_sessions()
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(session_cleanup_loop())
+
 
 @app.get("/")
 def health_check():
@@ -156,7 +182,10 @@ async def upload(request: Request, file: UploadFile = File(...), session_id: str
             if page_text.strip():
                 docs_with_metadata.append({
                     "text": page_text,
-                    "metadata": {"page": page_num + 1}
+                    "metadata": {
+                        "page": page_num + 1,
+                        "file_name": safe_name
+                    }
                 })
         doc.close()
         try:
@@ -170,7 +199,10 @@ async def upload(request: Request, file: UploadFile = File(...), session_id: str
         if text.strip():
             docs_with_metadata.append({
                 "text": text,
-                "metadata": {"page": 1}
+                "metadata": {
+                    "page": 1,
+                    "file_name": file.filename or "uploaded_file.txt"
+                }
             })
 
     if not docs_with_metadata:
@@ -320,7 +352,11 @@ async def chat(request: Request, chat_request: ChatRequest):
             seen_pages.add(page)
             # Create a short snippet (first 200 characters)
             snippet = doc.page_content[:200]
-            sources_list.append(SourceSnippet(page=page, snippet=snippet))
+            sources_list.append(SourceSnippet(
+                file_name=doc.metadata.get("file_name", "Unknown Document"),
+                page=page,
+                snippet=snippet
+            ))
     
     return ChatResponse(
         answer=result.get("answer", ""),
